@@ -1,3 +1,4 @@
+import 'module-alias/register';
 import { createApp } from './app';
 import { 
   initializeDatabase, 
