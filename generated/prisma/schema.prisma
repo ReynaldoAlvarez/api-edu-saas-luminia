@@ -1,0 +1,1052 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+// schema.prisma
+// -----------------------------------------------------------------------------
+// Revised Prisma schema for a multi-tenant Educational SaaS platform
+// - Backend: PostgreSQL (use DATABASE_URL env var)
+// - ORM: Prisma Client (generator below)
+// This file is a reviewed, consistent and production-oriented model.
+// Comments explain purpose of each model and important fields (examples).
+// -----------------------------------------------------------------------------
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/**
+ * ENUMS
+ * Consistent, centralized enumerations used across models.
+ */
+enum RoleName {
+  ADMIN
+  SECRETARY
+  DIRECTOR
+  TEACHER
+  STUDENT
+  TUTOR
+  FINANCE
+  SUPPORT
+}
+
+enum LevelType {
+  BASIC
+  TECHNICAL
+  BACHELOR
+  MASTER
+  DOCTORATE
+  OTHER
+}
+
+enum PaymentMethod {
+  CARD
+  BANK_TRANSFER
+  QR
+  CASH
+  WALLET
+  OTHER
+}
+
+enum PaymentStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REFUNDED
+  CANCELLED
+}
+
+enum GradeType {
+  EXAM
+  QUIZ
+  HOMEWORK
+  PROJECT
+  FINAL
+}
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  LATE
+  EXCUSED
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  EXPIRED
+  SUSPENDED
+  CANCELLED
+  TRIAL
+}
+
+enum StudentStatus {
+  ACTIVE
+  INACTIVE
+  GRADUATED
+  WITHDRAWN
+  SUSPENDED
+}
+
+enum CertificateType {
+  SUBJECT
+  COURSE
+  PROGRAM
+}
+
+enum PolicyEffect {
+  ALLOW
+  DENY
+}
+
+/**
+ * PLAN
+ * - Catalog of subscription plans and capabilities.
+ * - `features` JSON is flexible: {"aiTeacher":true,"aiTeacherCalls":50, "storageMB":1024}
+ * Example: { name: "pro", price: 49.99, studentLimit:500 }
+ */
+model Plan {
+  id                      String   @id @default(uuid())
+  name                    String
+  slug                    String   @unique // e.g. "free", "basic", "pro"
+  description             String?
+  price                   Decimal  @default("0.00") @db.Decimal(10, 2)
+  currency                String   @default("USD")
+  studentLimit            Int      @default(100)
+  teacherLimit            Int      @default(10)
+  adminLimit              Int      @default(3)
+  courseLimit             Int      @default(50)
+  aiTeacherCallsMonthly   Int      @default(0) // calls allowed per month (0 = disabled)
+  aiStudentMinutesMonthly Int      @default(0) // minutes of tutor usage per student
+  certificateMonthly      Int      @default(0)
+  virtualClassroomLimit   Int      @default(1)
+  storageMB               Int      @default(1024)
+  features                Json? // arbitrary flags/details
+  isActive                Boolean  @default(true)
+  createdAt               DateTime @default(now())
+
+  // Relations
+  institutions            Institution[] // institutions that reference this plan
+  InstitutionSubscription InstitutionSubscription[]
+}
+
+/**
+ * INSTITUTION
+ * - Tenant representing an educational institution.
+ * - settings JSON can include timezone, branding, payment gateway config, certificate template ids, etc.
+ * Example settings: { "timezone":"America/La_Paz", "currency":"BOB" }
+ */
+model Institution {
+  id           String   @id @default(uuid())
+  name         String
+  slug         String   @unique
+  contactEmail String
+  phone        String?
+  address      Json? // { street, city, state, postalCode, country }
+  planId       String?
+  plan         Plan?    @relation(fields: [planId], references: [id])
+  settings     Json?
+  status       String?  @default("active") // "active", "suspended"
+  createdAt    DateTime @default(now())
+
+  // Relations (tenant scope)
+  users               User[]
+  roles               Role[]
+  careers             Career[]
+  subscriptions       InstitutionSubscription[]
+  institutionPayments InstitutionPayment[]
+  institutionLogs     InstitutionLog[]
+  aiUsageLogs         AIUsageLog[]
+  templates           Template[]
+  integrations        Integration[]
+  apiClients          ApiClient[]
+  announcements       Announcement[]
+  backups             DataBackup[]
+  feeSchedules        FeeSchedule[]
+  ABACPolicy          ABACPolicy[]
+  students            Student[]
+  tutorProfile        TutorProfile[]
+  studentPayments     StudentPayment[]
+  aiAgents            AIAgent[]
+  webhooks            Webhook[]
+}
+
+/**
+ * INSTITUTION SUBSCRIPTION
+ * - Tracks the institution's active plan periods and renewal behavior.
+ * Example: startDate = 2025-01-01, billingCycle = "monthly"
+ */
+model InstitutionSubscription {
+  id            String             @id @default(uuid())
+  institutionId String
+  institution   Institution        @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+  planId        String
+  plan          Plan               @relation(fields: [planId], references: [id])
+  startDate     DateTime
+  endDate       DateTime?
+  status        SubscriptionStatus @default(ACTIVE)
+  autoRenew     Boolean            @default(true)
+  billingCycle  String? // "monthly" | "annual"
+  createdAt     DateTime           @default(now())
+
+  payments InstitutionPayment[]
+}
+
+/**
+ * INSTITUTION PAYMENT
+ * - Payments the institution makes to the SaaS owner for subscriptions/upgrades.
+ * - gatewayData stores provider response details (Stripe, PayPal, bank).
+ */
+model InstitutionPayment {
+  id             String                   @id @default(uuid())
+  institutionId  String
+  institution    Institution              @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+  subscriptionId String?
+  subscription   InstitutionSubscription? @relation(fields: [subscriptionId], references: [id])
+  amount         Decimal                  @db.Decimal(10, 2)
+  currency       String                   @default("USD")
+  method         PaymentMethod
+  status         PaymentStatus            @default(PENDING)
+  gatewayData    Json?
+  reference      String?                  @unique
+  createdAt      DateTime                 @default(now())
+}
+
+/**
+ * USER
+ * - Core user model used across roles and profiles.
+ * - password null indicates SSO/social login only.
+ * - attributes JSON used by ABAC policy engine for dynamic attributes (e.g. {"department":"theology","level":"senior"})
+ */
+model User {
+  id            String       @id @default(uuid())
+  institutionId String? // platform-level users may be null
+  institution   Institution? @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+  email         String       @unique
+  password      String? // hashed (bcrypt/argon2). null => SSO/ApiClient-only accounts
+  fullName      String
+  ci            String? // national id
+  phone         String?
+  isActive      Boolean      @default(true)
+  attributes    Json? // ABAC attributes and extra data
+  lastLogin     DateTime?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  // Relations to profiles (1:1 optional)
+  student                Student?
+  teacher                Teacher?
+  tutorProfile           TutorProfile?
+  dashboards             DashboardConfig[]
+  aiUsages               AIUsageLog[]
+  userRoles              UserRole[]
+  logs                   InstitutionLog[] // actions by this user
+  sentMessages           Message[]                @relation("MessageSender")
+  receivedMessages       Message[]                @relation("MessageRecipient")
+  notifications          Notification[]
+  careers                Career[]
+  courses                Course[]
+  lessonPlans            LessonPlan[]
+  virtualClassrooms      VirtualClassroom[]
+  grades                 Grade[]
+  attendances            Attendance[]
+  disciplinaryRecord     DisciplinaryRecord[]
+  certificate            Certificate[]
+  aIConversation         AIConversation[]
+  notificationPreference NotificationPreference[]
+  announcement           Announcement[]
+  dataBackups            DataBackup[]
+  templates              Template[]
+}
+
+/**
+ * ROLE
+ * - Defines roles at tenant or system level.
+ * - Use ABAC policies (ABACPolicy) for fine-grained rules; Role is used for grouping and defaults.
+ */
+model Role {
+  id            String       @id @default(uuid())
+  institutionId String? // null => global/system role
+  institution   Institution? @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+  name          RoleName
+  description   String?
+  isSystem      Boolean      @default(false)
+  createdAt     DateTime     @default(now())
+
+  userRoles UserRole[]
+}
+
+/**
+ * USER-ROLE pivot
+ * - Users can have multiple roles. isPrimary marks the primary active role for UI/ABAC defaults.
+ */
+model UserRole {
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  roleId     String
+  role       Role     @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  isPrimary  Boolean  @default(false)
+  assignedAt DateTime @default(now())
+
+  @@unique([userId, roleId])
+}
+
+/**
+ * ABAC POLICY
+ * - Stores attribute-based policy conditions as JSON, evaluated by policy engine (Oso/Casbin/custom).
+ * - condition example: { "expression": "user.attributes.department == resource.department && user.institutionId == resource.institutionId" }
+ */
+model ABACPolicy {
+  id            String       @id @default(uuid())
+  institutionId String?
+  institution   Institution? @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+  name          String
+  description   String?
+  resource      String // e.g. "Course", "VirtualClassroom", "Grade"
+  action        String // e.g. "create", "read", "update", "delete"
+  condition     Json? // DSL / expression tree for policy engine
+  effect        PolicyEffect @default(ALLOW)
+  isActive      Boolean      @default(true)
+  createdAt     DateTime     @default(now())
+}
+
+/**
+ * CAREER (PROGRAM)
+ * - Represents a program/career (a "degree"/"path").
+ * - Example: "Discipleship" (BASIC), "Bachelor of Theology" (BACHELOR)
+ */
+model Career {
+  id            String      @id @default(uuid())
+  institutionId String
+  institution   Institution @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+  name          String
+  code          String?
+  level         LevelType
+  description   String?
+  createdById   String?
+  createdBy     User?       @relation(fields: [createdById], references: [id])
+  createdAt     DateTime    @default(now())
+
+  courses     Course[]
+  periods     AcademicPeriod[]
+  students    Student[]
+  feeSchedule FeeSchedule[]
+
+  @@unique([institutionId, code], name: "unique_institution_career_code")
+}
+
+/**
+ * ACADEMIC PERIOD
+ * - Semesters or custom date ranges for a Career.
+ * - Example: "1st Semester 2026", startDate, endDate
+ */
+model AcademicPeriod {
+  id        String   @id @default(uuid())
+  careerId  String
+  career    Career   @relation(fields: [careerId], references: [id], onDelete: Cascade)
+  name      String
+  startDate DateTime
+  endDate   DateTime
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  courses     Course[]
+  enrollments Enrollment[]
+}
+
+/**
+ * COURSE
+ * - Logical grouping inside a Career (e.g. "Theology I").
+ * - Only administrative roles (secretary/director/admin) should create courses (enforced by ABAC).
+ */
+model Course {
+  id                String          @id @default(uuid())
+  careerId          String
+  career            Career          @relation(fields: [careerId], references: [id], onDelete: Cascade)
+  academicPeriodId  String?
+  academicPeriod    AcademicPeriod? @relation(fields: [academicPeriodId], references: [id])
+  name              String
+  code              String?
+  description       String?
+  credits           Int?
+  durationSemesters Int?
+  createdById       String?
+  createdBy         User?           @relation(fields: [createdById], references: [id])
+  createdAt         DateTime        @default(now())
+
+  subjects    Subject[]
+  enrollments Enrollment[]
+  certificate Certificate[]
+}
+
+/**
+ * SUBJECT
+ * - Specific subject/module under a Course (e.g. "Christology").
+ * - Administrators create subjects, then assign teachers to VirtualClassrooms.
+ */
+model Subject {
+  id          String   @id @default(uuid())
+  courseId    String
+  course      Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  name        String
+  code        String?
+  description String?
+  semester    Int?
+  credits     Int?
+  createdAt   DateTime @default(now())
+
+  classrooms         VirtualClassroom[]
+  studentSubjects    StudentSubject[]
+  disciplinaryRecord DisciplinaryRecord[]
+  certificate        Certificate[]
+}
+
+/**
+ * VIRTUAL CLASSROOM
+ * - Online classroom bound to a Subject; teacher is assigned by administrators.
+ * - aiConfig is JSON for model/prompt preferences per-classroom.
+ */
+model VirtualClassroom {
+  id             String           @id @default(uuid())
+  subjectId      String
+  subject        Subject          @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  code           String?          @unique
+  title          String?
+  teacherId      String?
+  teacher        User?            @relation(fields: [teacherId], references: [id])
+  aiEnabled      Boolean          @default(false)
+  aiConfig       Json?
+  createdAt      DateTime         @default(now())
+  aiagentId      String?
+  aiagent        AIAgent?         @relation(fields: [aiagentId], references: [id])
+  lessonPlans    LessonPlan[]
+  attendances    Attendance[]
+  aiUsages       AIUsageLog[]
+  studentSubject StudentSubject[]
+}
+
+/**
+ * LESSON PLAN
+ * - Plans created by teacher (optionally assisted by AI).
+ * - aiSuggestions stores structured content suggested by AI.
+ */
+model LessonPlan {
+  id            String           @id @default(uuid())
+  classroomId   String
+  classroom     VirtualClassroom @relation(fields: [classroomId], references: [id], onDelete: Cascade)
+  date          DateTime
+  topic         String
+  aiSuggestions Json?
+  createdById   String?
+  createdBy     User?            @relation(fields: [createdById], references: [id])
+  createdAt     DateTime         @default(now())
+}
+
+/**
+ * STUDENT
+ * - One-to-one with user for student-specific data.
+ * - studentNumber unique per institution.
+ */
+model Student {
+  id             String        @id @default(uuid())
+  userId         String        @unique
+  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  studentNumber  String?
+  institutionId  String
+  institution    Institution   @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+  careerId       String?
+  career         Career?       @relation(fields: [careerId], references: [id])
+  enrollmentDate DateTime      @default(now())
+  status         StudentStatus @default(ACTIVE)
+  metadata       Json?
+  createdAt      DateTime      @default(now())
+
+  enrollments        Enrollment[]
+  subjects           StudentSubject[]
+  attendances        Attendance[]
+  tutorAssignments   TutorStudent[]
+  payments           StudentPayment[]
+  certificates       Certificate[]
+  disciplinaryRecord DisciplinaryRecord[]
+  paymentPlan        PaymentPlan[]
+
+  @@unique([institutionId, studentNumber], name: "unique_institution_student_number")
+}
+
+/**
+ * ENROLLMENT
+ * - Student enrollment into a Course for a given AcademicPeriod.
+ */
+model Enrollment {
+  id               String          @id @default(uuid())
+  studentId        String
+  student          Student         @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  courseId         String
+  course           Course          @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  academicPeriodId String?
+  academicPeriod   AcademicPeriod? @relation(fields: [academicPeriodId], references: [id])
+  enrolledAt       DateTime        @default(now())
+  status           String? // "enrolled", "completed", "dropped"
+}
+
+/**
+ * STUDENT-SUBJECT
+ * - Per-subject enrollment tracking (finalGrade, status)
+ */
+model StudentSubject {
+  id          String            @id @default(uuid())
+  studentId   String
+  student     Student           @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  subjectId   String
+  subject     Subject           @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  classroomId String?
+  classroom   VirtualClassroom? @relation(fields: [classroomId], references: [id])
+  semester    Int?
+  year        Int?
+  finalGrade  Decimal?          @db.Decimal(5, 2)
+  status      String? // "enrolled", "passed", "failed"
+  createdAt   DateTime          @default(now())
+
+  grades Grade[]
+
+  @@unique([studentId, subjectId], name: "unique_student_subject")
+}
+
+/**
+ * GRADE
+ * - Assessment entries (exams, quizzes, homework).
+ * - weight: decimal fraction (0.0 - 1.0) representing contribution to final grade.
+ */
+model Grade {
+  id               String         @id @default(uuid())
+  studentSubjectId String
+  studentSubject   StudentSubject @relation(fields: [studentSubjectId], references: [id], onDelete: Cascade)
+  type             GradeType
+  weight           Decimal?       @db.Decimal(5, 2)
+  value            Decimal        @db.Decimal(5, 2)
+  comments         String?
+  createdById      String?
+  createdBy        User?          @relation(fields: [createdById], references: [id])
+  createdAt        DateTime       @default(now())
+}
+
+/**
+ * ATTENDANCE
+ * - Per-session attendance record.
+ * - Use indexes for fast queries by classroom and date.
+ */
+model Attendance {
+  id          String           @id @default(uuid())
+  studentId   String
+  student     Student          @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  classroomId String
+  classroom   VirtualClassroom @relation(fields: [classroomId], references: [id], onDelete: Cascade)
+  date        DateTime
+  status      AttendanceStatus
+  notedById   String?
+  notedBy     User?            @relation(fields: [notedById], references: [id])
+  note        String?
+  createdAt   DateTime         @default(now())
+
+  @@index([classroomId, date])
+}
+
+/**
+ * DISCIPLINARY RECORD
+ * - Incidents, warnings or commendations.
+ */
+model DisciplinaryRecord {
+  id           String   @id @default(uuid())
+  studentId    String
+  student      Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  subjectId    String?
+  subject      Subject? @relation(fields: [subjectId], references: [id])
+  recordedById String?
+  recordedBy   User?    @relation(fields: [recordedById], references: [id])
+  type         String? // "minor", "major", "commendation"
+  description  String
+  actionTaken  String?
+  date         DateTime @default(now())
+  seenByTutor  Boolean  @default(false)
+}
+
+/**
+ * TUTOR PROFILE
+ * - Extra metadata for guardian/tutor users.
+ */
+model TutorProfile {
+  id            String      @id @default(uuid())
+  userId        String      @unique
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  institutionId String
+  institution   Institution @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+  relationship  String? // "father", "mother", "guardian"
+  phone         String?
+  address       String?
+  metadata      Json?
+  createdAt     DateTime    @default(now())
+
+  tutorAssignments TutorStudent[]
+}
+
+/**
+ * TUTOR-STUDENT pivot
+ * - A tutor can be assigned to many students and vice-versa.
+ */
+model TutorStudent {
+  id         String       @id @default(uuid())
+  tutorId    String
+  tutor      TutorProfile @relation(fields: [tutorId], references: [id], onDelete: Cascade)
+  studentId  String
+  student    Student      @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  isPrimary  Boolean      @default(false)
+  assignedAt DateTime     @default(now())
+
+  @@unique([tutorId, studentId])
+}
+
+/**
+ * CERTIFICATE
+ * - Store certificates for subject/course/program completions.
+ * - fileUrl points to object storage (S3/DO-Spaces).
+ */
+model Certificate {
+  id         String          @id @default(uuid())
+  studentId  String
+  student    Student         @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  courseId   String?
+  course     Course?         @relation(fields: [courseId], references: [id])
+  subjectId  String?
+  subject    Subject?        @relation(fields: [subjectId], references: [id])
+  type       CertificateType
+  issuedAt   DateTime        @default(now())
+  fileUrl    String? // S3/Spaces path
+  issuedById String?
+  issuedBy   User?           @relation(fields: [issuedById], references: [id])
+  metadata   Json?
+}
+
+/**
+ * FEE SCHEDULE & INSTALLMENTS
+ * - FeeSchedule defines total fees for a career/course and allowed installments.
+ * - FeeInstallment are the scheduled due payments.
+ */
+model FeeSchedule {
+  id            String      @id @default(uuid())
+  institutionId String
+  institution   Institution @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+  careerId      String?
+  career        Career?     @relation(fields: [careerId], references: [id])
+  name          String
+  totalAmount   Decimal     @db.Decimal(10, 2)
+  currency      String      @default("USD")
+  installments  Int         @default(1)
+  frequency     String? // "monthly", "quarterly"
+  metadata      Json?
+  createdAt     DateTime    @default(now())
+
+  installmentsList FeeInstallment[]
+  paymentPlan      PaymentPlan[]
+}
+
+model FeeInstallment {
+  id            String      @id @default(uuid())
+  feeScheduleId String
+  feeSchedule   FeeSchedule @relation(fields: [feeScheduleId], references: [id], onDelete: Cascade)
+  sequence      Int
+  dueDate       DateTime
+  amount        Decimal     @db.Decimal(10, 2)
+  createdAt     DateTime    @default(now())
+
+  studentPayments StudentPayment[]
+}
+
+/**
+ * STUDENT PAYMENT
+ * - Payments made by students toward installments or ad-hoc fees.
+ * - gatewayData holds provider response details.
+ */
+model StudentPayment {
+  id               String          @id @default(uuid())
+  studentId        String
+  student          Student         @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  institutionId    String
+  institution      Institution     @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+  feeInstallmentId String?
+  feeInstallment   FeeInstallment? @relation(fields: [feeInstallmentId], references: [id])
+  amount           Decimal         @db.Decimal(10, 2)
+  currency         String          @default("USD")
+  method           PaymentMethod
+  status           PaymentStatus   @default(PENDING)
+  reference        String?         @unique
+  gatewayData      Json?
+  paidAt           DateTime?
+  createdAt        DateTime        @default(now())
+}
+
+/**
+ * PAYMENT PLAN
+ * - Optional: a per-student plan that aggregates installments and tracks remaining balance.
+ */
+model PaymentPlan {
+  id            String      @id @default(uuid())
+  studentId     String
+  student       Student     @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  feeScheduleId String
+  feeSchedule   FeeSchedule @relation(fields: [feeScheduleId], references: [id], onDelete: Cascade)
+
+  totalAmount     Decimal  @db.Decimal(10, 2)
+  paidAmount      Decimal  @default("0.00") @db.Decimal(10, 2)
+  remainingAmount Decimal  @db.Decimal(10, 2)
+  status          String   @default("active") // "active","completed","overdue"
+  createdAt       DateTime @default(now())
+}
+
+/**
+ * AI AGENT / CONVERSATION / MESSAGE
+ * - Support for teacher assistants and student tutors.
+ * - AIAgent: configuration for an agent (per-institution).
+ * - AIConversation: session grouping of messages by user and agent.
+ * - AIMessage: individual messages (user/assistant/system).
+ */
+model AIAgent {
+  id            String      @id @default(uuid())
+  institutionId String
+  institution   Institution @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+
+  type           String // "teacher_assistant", "student_tutor"
+  name           String
+  personality    String // "formal","friendly"
+  specialization String? // "theology","math"
+
+  maxTokensPerCall Int    @default(1000)
+  temperature      Float  @default(0.7)
+  systemPrompt     String
+
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  // Relations
+  conversations AIConversation[]
+  classrooms    VirtualClassroom[] // optional: agents assigned to specific classrooms
+}
+
+model AIConversation {
+  id      String  @id @default(uuid())
+  userId  String
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agentId String
+  agent   AIAgent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  sessionId   String // external session id (optional)
+  startedAt   DateTime  @default(now())
+  endedAt     DateTime?
+  totalTokens Int       @default(0)
+  totalCost   Decimal?  @db.Decimal(10, 4)
+
+  messages AIMessage[]
+}
+
+model AIMessage {
+  id             String         @id @default(uuid())
+  conversationId String
+  conversation   AIConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  role      String // "user","assistant","system"
+  content   String
+  tokens    Int?
+  createdAt DateTime @default(now())
+}
+
+/**
+ * AI USAGE LOG
+ * - Tracks AI calls for billing and auditing.
+ * - store minimal prompt/summary to avoid storing full user PII-sensitive content.
+ */
+model AIUsageLog {
+  id              String            @id @default(uuid())
+  userId          String
+  user            User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  institutionId   String
+  institution     Institution       @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+  classroomId     String?
+  classroom       VirtualClassroom? @relation(fields: [classroomId], references: [id])
+  promptSummary   String? // short summary of prompt
+  responseSummary String?
+  tokensUsed      Int?
+  cost            Decimal?          @db.Decimal(10, 4)
+  createdAt       DateTime          @default(now())
+}
+
+/**
+ * NOTIFICATIONS
+ * - Notification records and user preferences for channel delivery.
+ * - NotificationPreference controls user-level channels (email/push/in-app).
+ */
+model Notification {
+  id          String    @id @default(uuid())
+  recipientId String
+  recipient   User      @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+  title       String
+  body        String
+  meta        Json?
+  isRead      Boolean   @default(false)
+  readAt      DateTime?
+  pushSent    Boolean   @default(false)
+  emailSent   Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+
+  @@index([recipientId, isRead])
+}
+
+model NotificationPreference {
+  id          String   @id @default(uuid())
+  userId      String   @unique
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Example: {"email":true,"push":false,"sms":false}
+  preferences Json?
+  createdAt   DateTime @default(now())
+}
+
+/**
+ * INTERNAL MESSAGING
+ * - Simple internal messaging for staff/students/tutors.
+ */
+model Message {
+  id          String    @id @default(uuid())
+  senderId    String
+  sender      User      @relation("MessageSender", fields: [senderId], references: [id], onDelete: Cascade)
+  recipientId String
+  recipient   User      @relation("MessageRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+  subject     String?
+  body        String
+  attachments Json? // metadata/URLs for attachments
+  isRead      Boolean   @default(false)
+  readAt      DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([recipientId, isRead])
+}
+
+/**
+ * ANNOUNCEMENT
+ * - Institution-wide announcements (admin creates, all or role-targeted users receive).
+ */
+model Announcement {
+  id            String      @id @default(uuid())
+  institutionId String
+  institution   Institution @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+  title         String
+  body          String
+  targetRoles   String[] // e.g. ["TEACHER","STUDENT"]
+  startsAt      DateTime?
+  endsAt        DateTime?
+  createdById   String?
+  createdBy     User?       @relation(fields: [createdById], references: [id])
+  createdAt     DateTime    @default(now())
+}
+
+/**
+ * DATA BACKUP (metadata)
+ * - Tracks backups and versions for critical data exports.
+ * - storageUrl points to object storage where the backup file is stored.
+ */
+model DataBackup {
+  id            String      @id @default(uuid())
+  institutionId String
+  institution   Institution @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+  name          String // e.g. "full-db-2025-08-01"
+  description   String?
+  storageUrl    String
+  sizeBytes     Int?
+  createdById   String?
+  createdBy     User?       @relation(fields: [createdById], references: [id])
+  createdAt     DateTime    @default(now())
+}
+
+/**
+ * TEMPLATE
+ * - Reusable templates (certificate templates, email templates, document templates).
+ * - type example: "certificate", "email", "invoice"
+ */
+model Template {
+  id            String      @id @default(uuid())
+  institutionId String
+  institution   Institution @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+  name          String
+  type          String
+  body          String // HTML or template language
+  metadata      Json?
+  createdById   String?
+  createdBy     User?       @relation(fields: [createdById], references: [id])
+  createdAt     DateTime    @default(now())
+}
+
+/**
+ * INTEGRATION
+ * - External API integrations (payment gateway keys, LMS connectors).
+ * - store encrypted credentials in metadata if needed.
+ */
+model Integration {
+  id            String      @id @default(uuid())
+  institutionId String
+  institution   Institution @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+  name          String // e.g. "stripe", "s3", "google-classroom"
+  config        Json? // encrypted config: keys, endpoints
+  isActive      Boolean     @default(true)
+  createdAt     DateTime    @default(now())
+}
+
+/**
+ * API CLIENTS & KEYS
+ * - Allow third-party clients to consume the SaaS API securely.
+ * - apiKey should be hashed in DB; use raw key only at creation.
+ */
+model ApiClient {
+  id            String       @id @default(uuid())
+  institutionId String?
+  institution   Institution? @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+  clientId      String       @unique @default(cuid()) // public id
+  clientName    String
+  clientType    String // "mobile","web","integration","service"
+  apiKeyHash    String // hash of API key
+  scopes        String[] // allowed scopes ["read:students","write:grades"]
+  isActive      Boolean      @default(true)
+  createdAt     DateTime     @default(now())
+
+  usageLogs ApiUsageLog[]
+  rotations ApiKeyRotation[]
+}
+
+/**
+ * API USAGE LOG
+ * - Tracks usage by ApiClient for rate-limiting and billing.
+ */
+model ApiUsageLog {
+  id          String    @id @default(uuid())
+  apiClientId String
+  apiClient   ApiClient @relation(fields: [apiClientId], references: [id], onDelete: Cascade)
+  endpoint    String
+  method      String
+  statusCode  Int
+  latencyMs   Int?
+  createdAt   DateTime  @default(now())
+
+  @@index([apiClientId, createdAt])
+}
+
+/**
+ * API SCOPE
+ * - Predefined scopes used for client permissions.
+ */
+model ApiScope {
+  id          String  @id @default(uuid())
+  name        String  @unique // e.g. "read:students"
+  description String?
+}
+
+/**
+ * WEBHOOKS
+ * - Outbound webhook configurations and delivery logs.
+ */
+model Webhook {
+  id            String      @id @default(uuid())
+  institutionId String
+  institution   Institution @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+  name          String
+  url           String
+  events        String[] // events this webhook listens to
+  secret        String? // signing secret (store encrypted)
+  isActive      Boolean     @default(true)
+  createdAt     DateTime    @default(now())
+
+  deliveries WebhookDelivery[]
+}
+
+model WebhookDelivery {
+  id        String    @id @default(uuid())
+  webhookId String
+  webhook   Webhook   @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+  status    String // "pending","delivered","failed"
+  response  Json?
+  attempt   Int       @default(0)
+  sentAt    DateTime?
+  createdAt DateTime  @default(now())
+}
+
+/**
+ * API KEY ROTATION
+ * - Store rotations and metadata for keys (hashes).
+ */
+model ApiKeyRotation {
+  id          String    @id @default(uuid())
+  apiClientId String
+  apiClient   ApiClient @relation(fields: [apiClientId], references: [id], onDelete: Cascade)
+  keyHash     String
+  createdAt   DateTime  @default(now())
+  revokedAt   DateTime?
+}
+
+/**
+ * DASHBOARD CONFIG
+ * - Per-user dashboard customization (widgets/layout).
+ */
+model DashboardConfig {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String // "student","teacher","tutor","admin"
+  config    Json
+  updatedAt DateTime @updatedAt
+}
+
+/**
+ * TEACHER PROFILE
+ * - Extra metadata specific to teachers.
+ */
+model Teacher {
+  id          String    @id @default(uuid())
+  userId      String    @unique
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bio         String?
+  specialties String[] // ["Hermeneutics","Systematic Theology"]
+  hireDate    DateTime?
+  createdAt   DateTime  @default(now())
+}
+
+/**
+ * INSTITUTION LOG / AUDIT
+ * - Generic audit log for tenant-level events with optional JSON data.
+ */
+model InstitutionLog {
+  id            String      @id @default(uuid())
+  institutionId String
+  institution   Institution @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+  userId        String?
+  user          User?       @relation(fields: [userId], references: [id])
+  module        String? // e.g. "Student","Payment"
+  action        String // "CREATE","UPDATE","DELETE"
+  data          Json?
+  ip            String?
+  userAgent     String?
+  createdAt     DateTime    @default(now())
+
+  @@index([institutionId, createdAt])
+}
+
+/**
+ * ANNOUNCEMENTS, TEMPLATES, INTEGRATIONS, BACKUPS, LOGS
+ * - Already modeled above as Announcement, Template, Integration, DataBackup.
+ */
+
+/**
+ * FINISH: useful indexes or composite uniques can be added below as needed.
+ */

@@ -18,7 +18,8 @@
     "db:studio": "prisma studio",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
-    "prepare": "husky install"
+    "prepare": "husky install",
+    "vercel-build": "npm run build && prisma migrate deploy && npm run db:seed"
   },
   "_moduleAliases": {
     "@": "dist"
