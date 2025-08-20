@@ -172,7 +172,7 @@ export const createApp = (): Application => {
    */
   app.get('/', (req, res) => {
     const apiInfo = {
-      name: 'Educational SaaS API',
+      name: 'Educational SaaS API Prod',
       version: 'v1',
       description: 'API para plataforma educativa SaaS',
       documentation: '/api/docs',
