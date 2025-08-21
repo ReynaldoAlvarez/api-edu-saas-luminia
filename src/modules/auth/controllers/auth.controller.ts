@@ -245,5 +245,5 @@ export const getUserPermissions = asyncHandler(async (req: AuthenticatedRequest,
     permissions: [],
   };
 
-  successResponse(res, permissions, 'Permisos obtenidos exitosamente');
+  successResponse(res, permissions, 'Permisos obtenidos exitosamente!');
 });
