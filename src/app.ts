@@ -18,6 +18,7 @@ import logger from '@/shared/utils/logger';
 import { successResponse } from '@/shared/utils/response';
 import authRoutes from '@/modules/auth/routes';
 import userRoutes from '@/modules/users/routes';
+import studentRoutes from '@/modules/students/routes';
 /**
  * Configuración principal de la aplicación Express
  * Incluye middleware global, seguridad y configuración base
@@ -187,6 +188,10 @@ export const createApp = (): Application => {
   // TODO: Aquí se agregarán las rutas de los módulos
    app.use('/api/v1/auth', authRoutes);
    app.use('/api/v1/users', userRoutes);
+   /**
+ * Rutas de estudiantes
+ */
+app.use('/api/v1/students', studentRoutes);
   // app.use('/api/v1/institutions', institutionRoutes);
   // etc.
 
