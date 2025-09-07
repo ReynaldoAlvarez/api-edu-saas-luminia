@@ -4,7 +4,8 @@ import {
   loginUser, 
   refreshTokens, 
   changePassword, 
-  requestPasswordReset 
+  requestPasswordReset ,
+  registerFirstUserWithInstitution
 } from '../services/auth.service';
 import { 
   successResponse, 
@@ -197,6 +198,53 @@ export const resetPassword = asyncHandler(async (req: Request, res: Response): P
   // await resetUserPassword({ token, newPassword }, clientIp, userAgent);
 
   successResponse(res, { success: true }, 'Contraseña reseteada exitosamente');
+});
+
+/**
+ * Controlador para registrar el primer usuario e institución
+ * POST /api/v1/auth/register/first
+ */
+export const registerFirstUser = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+ 
+  const {
+    email,
+    password,
+    fullName,
+    ci,
+    phone,
+    institutionName,
+    institutionContactEmail,
+    institutionPhone
+  } = req.body;
+  
+  // Obtener información del cliente
+  const clientIp = req.ip;
+  const userAgent = req.get('User-Agent');
+
+  // Separar datos de usuario e institución
+  const userData = {
+    email,
+    password,
+    fullName,
+    ci,
+    phone,
+  };
+
+  const institutionData = {
+    institutionName,
+    institutionContactEmail,
+    institutionPhone,
+  };
+
+  // Llamar al servicio de registro inicial
+  const result = await registerFirstUserWithInstitution(
+    userData,
+    institutionData,
+    clientIp,
+    userAgent
+  );
+
+  createdResponse(res, result, 'Usuario e institución creados exitosamente. Sistema inicializado.');
 });
 
 /**

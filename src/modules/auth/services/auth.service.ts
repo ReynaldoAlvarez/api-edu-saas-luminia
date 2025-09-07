@@ -77,7 +77,33 @@ export interface ResetPasswordData {
   token: string;
   newPassword: string;
 }
-
+/**
+ * Generar slug único para la institución
+ */
+const generateUniqueSlug = async (name: string): Promise<string> => {
+  // Crear slug base
+  const baseSlug = name.toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .substring(0, 50); // Limitar longitud
+  
+  // Verificar si ya existe y generar variante única
+  let slug = baseSlug;
+  let counter = 1;
+  
+  while (await prisma.institution.findUnique({ where: { slug } })) {
+    slug = `${baseSlug}-${counter}`;
+    counter++;
+    
+    // Prevenir bucle infinito
+    if (counter > 1000) {
+      slug = `${baseSlug}-${Date.now()}`;
+      break;
+    }
+  }
+  
+  return slug;
+};
 /**
  * Función para registrar un nuevo usuario
  * @param data - Datos del usuario a registrar
@@ -91,6 +117,7 @@ export const registerUser = async (
   userAgent?: string
 ): Promise<AuthResponse> => {
   try {
+    
     // Validar que el email no esté en uso
     const existingUser = await prisma.user.findUnique({
       where: { email: data.email },
@@ -101,7 +128,7 @@ export const registerUser = async (
     }
 
     // Validar que la institución existe y está activa
-    const institution = await prisma.institution.findUnique({
+ /*    const institution = await prisma.institution.findUnique({
       where: { id: data.institutionId },
       select: { id: true, status: true, name: true },
     });
@@ -112,16 +139,25 @@ export const registerUser = async (
 
     if (institution.status !== 'active') {
       throw createAppError('Institución no activa', 403);
-    }
-
+    } */
+   
+// En registerUser, antes de crear el usuario:
+/* if (!data.institutionId) {
+  // Solo permitir si es el primer usuario
+  const userCount = await prisma.user.count();
+  if (userCount > 0) {
+    console.log("-------user count:",userCount)
+    throw createAppError('ID de institución es requerido', 400);
+  }
+  // Validar que el rol sea ADMIN para super admin
+  if (data.roleName !== 'ADMIN') {
+    throw createAppError('Primer usuario debe ser ADMIN', 400);
+  }
+} */
     // Validar que el rol existe
     const role = await prisma.role.findFirst({
       where: {
         name: data.roleName as any,
-        OR: [
-          { institutionId: data.institutionId },
-          { isSystem: true },
-        ],
       },
     });
 
@@ -231,6 +267,188 @@ export const registerUser = async (
 };
 
 /**
+ * Función para registrar el primer usuario e institución
+ * @param userData - Datos del usuario
+ * @param institutionData - Datos de la institución
+ * @param clientIp - IP del cliente
+ * @param userAgent - User agent del cliente
+ * @returns Respuesta de autenticación con tokens
+ */
+export const registerFirstUserWithInstitution = async (
+  userData: any,
+  institutionData: any,
+  clientIp?: string,
+  userAgent?: string
+): Promise<AuthResponse> => {
+  try {
+    
+
+    // Validar que el email de institución no esté en uso
+    const existingInstitution = await prisma.institution.findFirst({
+      where: { contactEmail: institutionData.institutionContactEmail },
+    });
+
+    if (existingInstitution) {
+      throw createAppError('El email de contacto de institución ya está registrado', 409);
+    }
+
+    // Obtener el plan FREE por defecto
+    const freePlan = await prisma.plan.findUnique({
+      where: { slug: 'free' },
+    });
+
+    if (!freePlan) {
+      throw createAppError('Plan FREE no encontrado en el sistema', 500);
+    }
+
+    // Validar contraseña del usuario
+    const passwordValidation = validatePassword(userData.password);
+    if (!passwordValidation.isValid) {
+      throw createAppError(`Contraseña inválida: ${passwordValidation.errors.join(', ')}`, 400);
+    }
+
+    // Hashear contraseña
+    const hashedPassword = await hashPassword(userData.password);
+
+    // Configuración por defecto para nueva institución
+    const defaultSettings = {
+      timezone: 'America/La_Paz',
+      currency: 'USD',
+      language: 'es',
+      branding: {
+        primaryColor: '#007bff',
+        logoUrl: null,
+        faviconUrl: null
+      },
+      features: {
+        aiEnabled: false,
+        certificatesEnabled: false,
+        virtualClassroomsEnabled: true,
+        attendanceTracking: true,
+        gradebook: true
+      },
+      notifications: {
+        email: true,
+        sms: false,
+        push: true
+      },
+      security: {
+        twoFactorAuth: false,
+        sessionTimeout: 24,
+        passwordPolicy: {
+          minLength: 8,
+          requireUppercase: true,
+          requireNumbers: true,
+          requireSpecialChars: true
+        }
+      }
+    };
+
+    // Crear todo en transacción
+    const result = await prisma.$transaction(async (tx) => {
+      // 1. Crear institución
+      const institution = await tx.institution.create({
+        data: {
+          name: institutionData.institutionName,
+          contactEmail: institutionData.institutionContactEmail,
+          phone: institutionData.institutionPhone,
+          planId: freePlan.id,
+          settings: defaultSettings,
+          status: 'active',
+          slug: await generateUniqueSlug(institutionData.institutionName)
+        },
+      });
+
+      // 2. Crear usuario admin
+      const user = await tx.user.create({
+        data: {
+          email: userData.email,
+          password: hashedPassword,
+          fullName: userData.fullName,
+          ci: userData.ci,
+          phone: userData.phone,
+          institutionId: institution.id,
+          isActive: true,
+        },
+      });
+
+      // 3. Asignar rol ADMIN
+      const adminRole = await tx.role.findFirst({
+        where: {
+          name: 'ADMIN',
+          isSystem: true,
+        },
+      });
+
+      if (!adminRole) {
+        throw createAppError('Rol de administrador del sistema no encontrado', 500);
+      }
+
+      await tx.userRole.create({
+        data: {
+          userId: user.id,
+          roleId: adminRole.id,
+          isPrimary: true,
+        },
+      });
+
+      // 4. Crear suscripción inicial
+      await tx.institutionSubscription.create({
+        data: {
+          institutionId: institution.id,
+          planId: freePlan.id,
+          startDate: new Date(),
+          status: 'ACTIVE',
+          autoRenew: true,
+        },
+      });
+
+      return {
+        institution,
+        user,
+      };
+    });
+
+    // Generar tokens
+    const tokenPayload: Omit<JwtPayload, 'iat' | 'exp'> = {
+      userId: result.user.id,
+      institutionId: result.institution.id,
+      roleName: 'ADMIN',
+      email: result.user.email,
+    };
+
+    const tokens = generateTokenPair(tokenPayload);
+
+    // Log del evento
+    logAuthEvent('first_user_registered', result.user.id, clientIp, userAgent, {
+      institutionId: result.institution.id,
+      institutionName: result.institution.name,
+    });
+
+    logBusinessEvent('system_initialized', result.institution.id, result.user.id, {
+      method: 'first_user_registration',
+    });
+
+    return {
+      user: {
+        id: result.user.id,
+        email: result.user.email,
+        fullName: result.user.fullName,
+        institutionId: result.institution.id,
+        roleName: 'ADMIN',
+        isActive: result.user.isActive,
+      },
+      tokens,
+    };
+  } catch (error) {
+    if (error instanceof Error && (error as any).statusCode) {
+      throw error;
+    }
+    throw createAppError('Error interno durante el registro inicial', 500);
+  }
+};
+
+/**
  * Función para autenticar un usuario
  * @param data - Datos de login
  * @param clientIp - IP del cliente
@@ -278,13 +496,21 @@ export const loginUser = async (
       throw createAppError('Usuario inactivo', 401);
     }
 
-    // Verificar que la institución esté activa
-    if (!user.institution || user.institution.status !== 'active') {
+    // Verificar que la institución esté activa, menos para usuarios con rol de ADMIN
+    const isAdmin = user.userRoles.some(ur => ur.role.name === 'ADMIN');
+    if (!isAdmin && (!user.institution || user.institution.status !== 'active')) {
       logAuthEvent('login_failed', user.id, clientIp, userAgent, {
         reason: 'institution_inactive',
       });
       throw createAppError('Institución inactiva', 403);
     }
+
+    /* if (!user.institution || user.institution.status !== 'active') {
+      logAuthEvent('login_failed', user.id, clientIp, userAgent, {
+        reason: 'institution_inactive',
+      });
+      throw createAppError('Institución inactiva', 403);
+    } */
 
     // Verificar contraseña
     if (!user.password) {

@@ -13,7 +13,7 @@ import logger from './logger';
 export interface JwtPayload {
   userId: string;
   institutionId: string;
-  roleId: string;
+  roleId?: string;
   roleName: string;
   email: string;
   iat?: number;
