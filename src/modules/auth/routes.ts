@@ -10,6 +10,7 @@ import {
   resetPassword,
   verifyToken,
   getUserPermissions,
+  registerFirstUser,
 } from './controllers/auth.controller';
 import {
   validateRegister,
@@ -18,6 +19,7 @@ import {
   validateChangePassword,
   validateRequestPasswordReset,
   validateResetPassword,
+  validateRegisterFirstUser
 } from './validators/auth.validator';
 import { authenticate } from '@/shared/middleware/auth.middleware';
 import { setTenantContext } from '@/shared/middleware/tenant.middleware';
@@ -84,12 +86,19 @@ router.post('/request-password-reset', validateRequestPasswordReset, requestPass
  * @access  Public
  */
 router.post('/reset-password', validateResetPassword, resetPassword);
-
+/**
+ * @route   POST /api/v1/auth/register/first
+ * @desc    Registrar primer usuario e institución (inicialización del sistema)
+ * @access  Public (Solo para primer registro)
+ */
+router.post('/register/first', validateRegisterFirstUser, registerFirstUser);
 /**
  * @route   GET /api/v1/auth/verify
  * @desc    Verificar validez del token
  * @access  Private
  */
+
+
 router.get('/verify', authenticate, verifyToken);
 
 /**

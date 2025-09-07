@@ -88,14 +88,14 @@ export const authenticate = async (
       return;
     }
 
-    // Verificar que la institución está activa
-    if (user.institution?.status !== 'active') {
-      logAuthEvent('institution_inactive', user.id, req.ip, req.get('User-Agent'), {
-        institutionId: user.institutionId,
-      });
-      forbiddenResponse(res, 'Institución inactiva');
-      return;
-    }
+    // Verificar que la institución esté activa (solo si tiene institución)
+if (user.institutionId && (!user.institution || user.institution.status !== 'active')) {
+  logAuthEvent('institution_inactive', user.id, req.ip, req.get('User-Agent'), {
+    institutionId: user.institutionId,
+  });
+  forbiddenResponse(res, 'Institución inactiva');
+  return;
+}
 
     // Verificar que el usuario tiene al menos un rol activo
     const activeRole = user.userRoles.find(userRole => userRole.isPrimary) || user.userRoles[0];

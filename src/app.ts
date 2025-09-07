@@ -19,6 +19,7 @@ import { successResponse } from '@/shared/utils/response';
 import authRoutes from '@/modules/auth/routes';
 import userRoutes from '@/modules/users/routes';
 import studentRoutes from '@/modules/students/routes';
+import institutionRoutes from '@/modules/institutions/routes';
 /**
  * Configuración principal de la aplicación Express
  * Incluye middleware global, seguridad y configuración base
@@ -192,6 +193,10 @@ export const createApp = (): Application => {
  * Rutas de estudiantes
  */
 app.use('/api/v1/students', studentRoutes);
+/**
+ * Rutas de instituciones
+ */
+app.use('/api/v1/institutions', institutionRoutes);
   // app.use('/api/v1/institutions', institutionRoutes);
   // etc.
 

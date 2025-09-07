@@ -39,8 +39,9 @@ export const setTenantContext = (
   }
 
   // Establecer institutionId desde el usuario autenticado
+  console.log("req.user:------", req.user)
   req.institutionId = req.user.institutionId;
-
+  console.log("req.institutionId-------",req.institutionId)
   next();
 };
 
@@ -62,6 +63,8 @@ export const validateTenantAccess = async (
 
     // Obtener institutionId del parámetro de ruta o del usuario
     const requestedInstitutionId = req.params.institutionId || req.user.institutionId;
+
+    console.log("ID de institución requerido---------",requestedInstitutionId)
 
     if (!requestedInstitutionId) {
       badRequestResponse(res, 'ID de institución requerido');
